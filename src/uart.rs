@@ -2,23 +2,69 @@ use crossbeam_channel::Sender;
 use std::collections::VecDeque;
 
 pub struct UartRx {
-    // TODO: coloque outros atributos que você precisar aqui
+    circ_buffer: Vec<u8>,
+    pointer: usize,
+    byte: u8,
+    pos: usize,
+    in_frame: bool,
+    middle_zeroes: usize,
+    middle_samples: usize,
+    middle_samples_threshold: usize,
+    samples_back_to_start: usize,
     samples_per_symbol: usize,
     to_pty: Sender<u8>,
 }
 
 impl UartRx {
     pub fn new(samples_per_symbol: usize, to_pty: Sender<u8>) -> Self {
-        // TODO: inicialize seus novos atributos abaixo
+        let middle_samples = 3 * samples_per_symbol / 16;
+        let middle_samples_threshold = 5 * middle_samples / 6;
+        let samples_back_to_start = samples_per_symbol / 2 + middle_samples / 2;
+        let circ_buffer = vec![1; samples_per_symbol];
         UartRx {
             samples_per_symbol,
             to_pty,
+            middle_samples,
+            middle_samples_threshold,
+            samples_back_to_start,
+            circ_buffer,
+            in_frame: false,
+            byte: 0,
+            middle_zeroes: 0,
+            pointer: 0,
+            pos: 0,
         }
     }
 
     pub fn put_samples(&mut self, buffer: &[u8]) {
-        // TODO: seu código aqui
-        self.to_pty.send(65).unwrap();  // TODO: remova esta linha, é um exemplo de como mandar um byte para a pty
+        for sample in buffer {
+            self.pointer = (self.pointer + 1) % self.circ_buffer.len();
+            self.circ_buffer[self.pointer] = *sample;
+            let middle_samples_start = (self.pointer + self.circ_buffer.len() - self.middle_samples) % self.circ_buffer.len();
+            self.middle_zeroes += self.circ_buffer[middle_samples_start] as usize - *sample as usize;
+            
+            if !self.in_frame {
+                let frame_start = (self.pointer + self.circ_buffer.len() - self.samples_back_to_start) % self.circ_buffer.len();
+                
+                if self.middle_zeroes >= self.middle_samples_threshold && self.circ_buffer[frame_start] == 0 {
+                    self.in_frame = true;
+                    self.pos = self.samples_back_to_start;
+                    self.byte = 0;
+                }
+            } else {
+                self.pos += 1;
+                if self.pos % self.samples_per_symbol == self.samples_per_symbol / 2 {
+                    
+                    self.byte = (self.byte >> 1) | (sample << 7);
+                    if self.pos / self.samples_per_symbol == 8 {
+                        self.to_pty.send(self.byte).unwrap();
+                    }
+                    if self.pos / self.samples_per_symbol == 9 {
+                        self.in_frame = false;
+                    }
+                }
+            }
+        }
     }
 }
 
